@@ -95,7 +95,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
 // Initialize serial port
 // Returns file descriptor on success, -1 on failure
 int init_serial_port(const std::string& device, int baud_rate = B115200) {
-    int fd = open(device.c_str(), O_WRONLY | O_NOCTTY | O_SYNC);
+    fprintf(stderr, "Opening serial port '%s'\n", device.c_str());
+    int fd = open(device.c_str(), O_WRONLY | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
         fprintf(stderr, "Error opening serial port %s: %s\n", device.c_str(), strerror(errno));
         return -1;
@@ -132,6 +133,7 @@ int init_serial_port(const std::string& device, int baud_rate = B115200) {
         return -1;
     }
 
+    fprintf(stderr, "Opened the serial port\n");
     return fd;
 }
 
@@ -275,9 +277,10 @@ int main(int argc, char ** argv) {
         serial_fd = init_serial_port(params.serial_port);
         if (serial_fd < 0) {
             fprintf(stderr, "%s: failed to open serial port '%s'\n", __func__, params.serial_port.c_str());
-            return 1;
-        }
-        fprintf(stderr, "%s: serial port '%s' opened successfully\n", __func__, params.serial_port.c_str());
+            // return 1;
+        } else {
+            fprintf(stderr, "%s: serial port '%s' opened successfully\n", __func__, params.serial_port.c_str());
+	}
     }
 
     wav_writer wavWriter;
