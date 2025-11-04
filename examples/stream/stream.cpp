@@ -13,6 +13,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <cstring>
 
 // command-line parameters
 struct whisper_params {
@@ -41,6 +45,7 @@ struct whisper_params {
     std::string language  = "en";
     std::string model     = "models/ggml-base.en.bin";
     std::string fname_out;
+    std::string serial_port;
 };
 
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
@@ -70,6 +75,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-l"    || arg == "--language")      { params.language      = argv[++i]; }
         else if (arg == "-m"    || arg == "--model")         { params.model         = argv[++i]; }
         else if (arg == "-f"    || arg == "--file")          { params.fname_out     = argv[++i]; }
+        else if (arg == "-sp"   || arg == "--serial-port")   { params.serial_port   = argv[++i]; }
         else if (arg == "-tdrz" || arg == "--tinydiarize")   { params.tinydiarize   = true; }
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
@@ -84,6 +90,49 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
     }
 
     return true;
+}
+
+// Initialize serial port
+// Returns file descriptor on success, -1 on failure
+int init_serial_port(const std::string& device, int baud_rate = B115200) {
+    int fd = open(device.c_str(), O_WRONLY | O_NOCTTY | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr, "Error opening serial port %s: %s\n", device.c_str(), strerror(errno));
+        return -1;
+    }
+
+    struct termios tty;
+    if (tcgetattr(fd, &tty) != 0) {
+        fprintf(stderr, "Error getting serial port attributes: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    // Set baud rate
+    cfsetospeed(&tty, baud_rate);
+    cfsetispeed(&tty, baud_rate);
+
+    // 8N1 mode (8 data bits, no parity, 1 stop bit)
+    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
+    tty.c_iflag &= ~IGNBRK;
+    tty.c_lflag = 0;
+    tty.c_oflag = 0;
+    tty.c_cc[VMIN]  = 0;
+    tty.c_cc[VTIME] = 5;
+
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cflag &= ~(PARENB | PARODD);
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CRTSCTS;
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        fprintf(stderr, "Error setting serial port attributes: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    return fd;
 }
 
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params) {
@@ -109,6 +158,7 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -l LANG,  --language LANG [%-7s] spoken language\n",                                params.language.c_str());
     fprintf(stderr, "  -m FNAME, --model FNAME   [%-7s] model path\n",                                     params.model.c_str());
     fprintf(stderr, "  -f FNAME, --file FNAME    [%-7s] text output file name\n",                          params.fname_out.c_str());
+    fprintf(stderr, "  -sp DEV,  --serial-port DEV [%-7s] serial port device (e.g., /dev/ttyUSB0)\n",      params.serial_port.c_str());
     fprintf(stderr, "  -tdrz,    --tinydiarize   [%-7s] enable tinydiarize (requires a tdrz model)\n",     params.tinydiarize ? "true" : "false");
     fprintf(stderr, "  -sa,      --save-audio    [%-7s] save the recorded audio to a file\n",              params.save_audio ? "true" : "false");
     fprintf(stderr, "  -ng,      --no-gpu        [%-7s] disable GPU inference\n",                          params.use_gpu ? "false" : "true");
@@ -217,6 +267,17 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "%s: failed to open output file '%s'!\n", __func__, params.fname_out.c_str());
             return 1;
         }
+    }
+
+    // Initialize serial port if specified
+    int serial_fd = -1;
+    if (params.serial_port.length() > 0) {
+        serial_fd = init_serial_port(params.serial_port);
+        if (serial_fd < 0) {
+            fprintf(stderr, "%s: failed to open serial port '%s'\n", __func__, params.serial_port.c_str());
+            return 1;
+        }
+        fprintf(stderr, "%s: serial port '%s' opened successfully\n", __func__, params.serial_port.c_str());
     }
 
     wav_writer wavWriter;
@@ -372,6 +433,11 @@ int main(int argc, char ** argv) {
                         if (params.fname_out.length() > 0) {
                             fout << text;
                         }
+
+                        // Write to serial port if configured
+                        if (serial_fd >= 0) {
+                            write(serial_fd, text, strlen(text));
+                        }
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
@@ -389,6 +455,11 @@ int main(int argc, char ** argv) {
 
                         if (params.fname_out.length() > 0) {
                             fout << output;
+                        }
+
+                        // Write to serial port if configured
+                        if (serial_fd >= 0) {
+                            write(serial_fd, output.c_str(), output.length());
                         }
                     }
                 }
@@ -432,6 +503,12 @@ int main(int argc, char ** argv) {
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
+
+    // Close serial port if opened
+    if (serial_fd >= 0) {
+        close(serial_fd);
+        fprintf(stderr, "%s: serial port closed\n", __func__);
+    }
 
     return 0;
 }
