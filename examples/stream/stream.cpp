@@ -137,6 +137,21 @@ int init_serial_port(const std::string& device, int baud_rate = B115200) {
     return fd;
 }
 
+void hid_echo(int serial_fd, const std::string &text) {
+    // Filter out the [BLANK AUDIO] message and maybe others
+    if (text.find("[BLANK_AUDIO]") != std::string::npos) {
+	return;
+    }
+
+    // Write to serial port if configured
+    if (serial_fd < 0) {
+	return;
+    }
+
+    // write data to serial port
+    write(serial_fd, text.c_str(), text.size());
+}
+
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params) {
     fprintf(stderr, "\n");
     fprintf(stderr, "usage: %s [options]\n", argv[0]);
@@ -437,10 +452,7 @@ int main(int argc, char ** argv) {
                             fout << text;
                         }
 
-                        // Write to serial port if configured
-                        if (serial_fd >= 0) {
-                            write(serial_fd, text, strlen(text));
-                        }
+			hid_echo(serial_fd, text);
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
@@ -460,10 +472,7 @@ int main(int argc, char ** argv) {
                             fout << output;
                         }
 
-                        // Write to serial port if configured
-                        if (serial_fd >= 0) {
-                            write(serial_fd, output.c_str(), output.length());
-                        }
+			hid_echo(serial_fd, text);
                     }
                 }
 
