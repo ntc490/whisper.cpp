@@ -454,10 +454,17 @@ int main(int argc, char ** argv) {
             // print result;
             {
                 if (!use_vad) {
-                    // Use backspace characters to erase previous text
+                    // Use backspace characters to erase previous text on console
                     printf("%s", std::string(prev_text_len, '\b').c_str());
                     printf("%s", std::string(prev_text_len, ' ').c_str());
                     printf("%s", std::string(prev_text_len, '\b').c_str());
+
+                    // Send same backspaces to serial port
+                    if (serial_fd >= 0 && prev_text_len > 0) {
+                        std::string backspaces(prev_text_len, '\b');
+                        write(serial_fd, backspaces.c_str(), backspaces.size());
+                        fprintf(stderr, "[HID] Sent %d backspaces\n", prev_text_len);
+                    }
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
                     const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
