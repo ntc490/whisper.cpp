@@ -187,6 +187,53 @@ int init_serial_port(const std::string& device, int baud_rate = B115200) {
     return fd;
 }
 
+// Forward declaration for check_control_port
+bool init_audio_device(std::unique_ptr<audio_async> &audio, int length_ms, int capture_id);
+
+// Helper to check control port and update audio_enabled state
+// Returns true if state changed
+bool check_control_port(int control_fd, bool &audio_enabled, std::unique_ptr<audio_async> &audio, int length_ms, int capture_id) {
+    if (control_fd < 0) {
+        return false;  // No control port configured
+    }
+
+    char buf[256];
+    ssize_t n = read(control_fd, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return false;  // No data available
+    }
+
+    buf[n] = '\0';
+    std::string cmd(buf);
+    fprintf(stderr, "[Control] Received: \"%s\"\n", cmd.c_str());
+
+    bool state_changed = false;
+
+    // Process BTN_OFF first to handle quick button presses
+    if (cmd.find("BTN_OFF") != std::string::npos) {
+        if (audio_enabled) {
+            fprintf(stderr, "[Control] BTN_OFF detected - Closing audio device\n");
+            audio_enabled = false;
+            audio.reset();
+            state_changed = true;
+        }
+    }
+
+    if (cmd.find("BTN_ON") != std::string::npos) {
+        if (!audio_enabled) {
+            fprintf(stderr, "[Control] BTN_ON detected - Opening audio device\n");
+            if (init_audio_device(audio, length_ms, capture_id)) {
+                audio_enabled = true;
+                state_changed = true;
+            } else {
+                fprintf(stderr, "[Control] Failed to open audio device\n");
+            }
+        }
+    }
+
+    return state_changed;
+}
+
 // Returns the number of characters actually sent to the HID device
 int hid_echo(int serial_fd, const std::string &text) {
     // Write to serial port if configured
@@ -438,38 +485,7 @@ int main(int argc, char ** argv) {
         }
 
         // Check control port for BTN_ON/BTN_OFF commands
-        if (control_fd >= 0) {
-            char buf[256];
-            ssize_t n = read(control_fd, buf, sizeof(buf) - 1);
-            if (n > 0) {
-                buf[n] = '\0';
-                std::string cmd(buf);
-
-                // Debug: show what was received
-                fprintf(stderr, "[Control] Received: \"%s\"\n", cmd.c_str());
-
-                // Process BTN_OFF first to handle quick button presses
-                // Use separate if statements (not else if) to handle both in same buffer
-                if (cmd.find("BTN_OFF") != std::string::npos) {
-                    if (audio_enabled) {
-                        fprintf(stderr, "[Control] BTN_OFF detected - Closing audio device\n");
-                        audio_enabled = false;
-                        audio.reset();  // Destroy audio object, closing the device
-                    }
-                }
-
-                if (cmd.find("BTN_ON") != std::string::npos) {
-                    if (!audio_enabled) {
-                        fprintf(stderr, "[Control] BTN_ON detected - Opening audio device\n");
-                        if (init_audio_device(audio, params.length_ms, params.capture_id)) {
-                            audio_enabled = true;
-                        } else {
-                            fprintf(stderr, "[Control] Failed to open audio device\n");
-                        }
-                    }
-                }
-            }
-        }
+        check_control_port(control_fd, audio_enabled, audio, params.length_ms, params.capture_id);
 
         // Skip audio processing if disabled
         if (!audio_enabled) {
@@ -486,6 +502,13 @@ int main(int argc, char ** argv) {
                 if (!is_running) {
                     break;
                 }
+
+                // Check control port while waiting for audio - allows quick response
+                check_control_port(control_fd, audio_enabled, audio, params.length_ms, params.capture_id);
+                if (!audio_enabled) {
+                    break;  // Audio was disabled, exit audio collection loop
+                }
+
                 audio->get(params.step_ms, pcmf32_new);
 
                 if ((int) pcmf32_new.size() > 2*n_samples_step) {
@@ -567,6 +590,12 @@ int main(int argc, char ** argv) {
 
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
+
+            // Check control port one more time before expensive whisper_full() call
+            check_control_port(control_fd, audio_enabled, audio, params.length_ms, params.capture_id);
+            if (!audio_enabled) {
+                continue;  // Audio disabled, skip processing and go to next loop iteration
+            }
 
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
