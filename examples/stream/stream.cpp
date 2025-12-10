@@ -139,17 +139,18 @@ int init_serial_port(const std::string& device, int baud_rate = B115200) {
     return fd;
 }
 
-void hid_echo(int serial_fd, const std::string &text) {
+// Returns the number of characters actually sent to the HID device
+int hid_echo(int serial_fd, const std::string &text) {
     // Write to serial port if configured
     if (serial_fd < 0) {
-	return;
+	return 0;
     }
 
     // Filter out any text that contains square brackets (non-speech annotations)
     // Examples: [BLANK_AUDIO], [Silence], [Clock ticking], [Music], [typing], etc.
     if (text.find('[') != std::string::npos || text.find(']') != std::string::npos) {
         fprintf(stderr, "[HID] Filtered out: \"%s\"\n", text.c_str());
-        return;
+        return 0;
     }
 
     // Skip if text is empty or only whitespace
@@ -161,7 +162,7 @@ void hid_echo(int serial_fd, const std::string &text) {
         }
     }
     if (!has_content) {
-        return;
+        return 0;
     }
 
     // Debug: show what's being sent to HID with escaped chars
@@ -176,6 +177,7 @@ void hid_echo(int serial_fd, const std::string &text) {
 
     // write data to serial port
     write(serial_fd, text.c_str(), text.size());
+    return text.size();
 }
 
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params) {
@@ -302,6 +304,7 @@ int main(int argc, char ** argv) {
 
     int n_iter = 0;
     int prev_text_len = 0;  // Track length of previously printed text for backspace clearing
+    int prev_hid_len = 0;   // Track length of text actually sent to HID device
 
     bool is_running = true;
 
@@ -459,11 +462,11 @@ int main(int argc, char ** argv) {
                     printf("%s", std::string(prev_text_len, ' ').c_str());
                     printf("%s", std::string(prev_text_len, '\b').c_str());
 
-                    // Send same backspaces to serial port
-                    if (serial_fd >= 0 && prev_text_len > 0) {
-                        std::string backspaces(prev_text_len, '\b');
+                    // Send backspaces to serial port for text that was actually sent
+                    if (serial_fd >= 0 && prev_hid_len > 0) {
+                        std::string backspaces(prev_hid_len, '\b');
                         write(serial_fd, backspaces.c_str(), backspaces.size());
-                        fprintf(stderr, "[HID] Sent %d backspaces\n", prev_text_len);
+                        fprintf(stderr, "[HID] Sent %d backspaces\n", prev_hid_len);
                     }
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
@@ -475,6 +478,7 @@ int main(int argc, char ** argv) {
                 }
 
                 int current_text_len = 0;  // Track length of text in this iteration
+                int current_hid_len = 0;   // Track length of text sent to HID in this iteration
                 const int n_segments = whisper_full_n_segments(ctx);
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
@@ -488,7 +492,7 @@ int main(int argc, char ** argv) {
                             fout << text;
                         }
 
-			hid_echo(serial_fd, text);
+			current_hid_len += hid_echo(serial_fd, text);
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
@@ -509,13 +513,14 @@ int main(int argc, char ** argv) {
                             fout << output;
                         }
 
-			hid_echo(serial_fd, text);
+			current_hid_len += hid_echo(serial_fd, text);
                     }
                 }
 
                 // Update previous text length for next iteration (only in non-VAD mode)
                 if (!use_vad) {
                     prev_text_len = current_text_len;
+                    prev_hid_len = current_hid_len;
                 }
 
                 if (params.fname_out.length() > 0) {
@@ -533,6 +538,7 @@ int main(int argc, char ** argv) {
             if (!use_vad && (n_iter % n_new_line) == 0) {
                 printf("\n");
                 prev_text_len = 0;  // Reset after newline since we're starting a fresh line
+                prev_hid_len = 0;   // Reset HID tracking too
 
                 // keep part of the audio for next iteration to try to mitigate word boundary issues
                 pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
