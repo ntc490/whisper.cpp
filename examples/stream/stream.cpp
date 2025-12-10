@@ -146,9 +146,10 @@ int hid_echo(int serial_fd, const std::string &text) {
 	return 0;
     }
 
-    // Filter out any text that contains square brackets (non-speech annotations)
-    // Examples: [BLANK_AUDIO], [Silence], [Clock ticking], [Music], [typing], etc.
-    if (text.find('[') != std::string::npos || text.find(']') != std::string::npos) {
+    // Filter out any text that contains square brackets or parentheses (non-speech annotations)
+    // Examples: [BLANK_AUDIO], [Silence], [Clock ticking], [Music], [typing], (door slams), (laughter), etc.
+    if (text.find('[') != std::string::npos || text.find(']') != std::string::npos ||
+        text.find('(') != std::string::npos || text.find(')') != std::string::npos) {
         fprintf(stderr, "[HID] Filtered out: \"%s\"\n", text.c_str());
         return 0;
     }
