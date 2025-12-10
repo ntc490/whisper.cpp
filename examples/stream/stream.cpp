@@ -445,20 +445,27 @@ int main(int argc, char ** argv) {
                 buf[n] = '\0';
                 std::string cmd(buf);
 
+                // Debug: show what was received
+                fprintf(stderr, "[Control] Received: \"%s\"\n", cmd.c_str());
+
+                // Process BTN_OFF first to handle quick button presses
+                // Use separate if statements (not else if) to handle both in same buffer
+                if (cmd.find("BTN_OFF") != std::string::npos) {
+                    if (audio_enabled) {
+                        fprintf(stderr, "[Control] BTN_OFF detected - Closing audio device\n");
+                        audio_enabled = false;
+                        audio.reset();  // Destroy audio object, closing the device
+                    }
+                }
+
                 if (cmd.find("BTN_ON") != std::string::npos) {
                     if (!audio_enabled) {
-                        fprintf(stderr, "[Control] Audio capture ENABLED - Opening audio device\n");
+                        fprintf(stderr, "[Control] BTN_ON detected - Opening audio device\n");
                         if (init_audio_device(audio, params.length_ms, params.capture_id)) {
                             audio_enabled = true;
                         } else {
                             fprintf(stderr, "[Control] Failed to open audio device\n");
                         }
-                    }
-                } else if (cmd.find("BTN_OFF") != std::string::npos) {
-                    if (audio_enabled) {
-                        fprintf(stderr, "[Control] Audio capture DISABLED - Closing audio device\n");
-                        audio_enabled = false;
-                        audio.reset();  // Destroy audio object, closing the device
                     }
                 }
             }
