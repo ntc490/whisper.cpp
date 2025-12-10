@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <memory>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -228,6 +229,19 @@ int hid_echo(int serial_fd, const std::string &text) {
     return text.size();
 }
 
+// Helper function to initialize audio device
+bool init_audio_device(std::unique_ptr<audio_async> &audio, int length_ms, int capture_id) {
+    audio.reset(new audio_async(length_ms));
+    if (!audio->init(capture_id, WHISPER_SAMPLE_RATE)) {
+        fprintf(stderr, "Error: audio.init() failed!\n");
+        audio.reset();
+        return false;
+    }
+    audio->resume();
+    fprintf(stderr, "Audio device opened and started\n");
+    return true;
+}
+
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params) {
     fprintf(stderr, "\n");
     fprintf(stderr, "usage: %s [options]\n", argv[0]);
@@ -288,14 +302,8 @@ int main(int argc, char ** argv) {
     params.max_tokens     = 0;
 
     // init audio
-
-    audio_async audio(params.length_ms);
-    if (!audio.init(params.capture_id, WHISPER_SAMPLE_RATE)) {
-        fprintf(stderr, "%s: audio.init() failed!\n", __func__);
-        return 1;
-    }
-
-    audio.resume();
+    // Use unique_ptr so we can destroy and recreate the audio device for control port
+    std::unique_ptr<audio_async> audio;
 
     // whisper init
     if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
@@ -392,6 +400,14 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Initialize audio device now if no control port, otherwise wait for BTN_ON
+    if (control_fd < 0) {
+        if (!init_audio_device(audio, params.length_ms, params.capture_id)) {
+            fprintf(stderr, "%s: failed to initialize audio device\n", __func__);
+            return 1;
+        }
+    }
+
     wav_writer wavWriter;
     // save wav file
     if (params.save_audio) {
@@ -431,16 +447,18 @@ int main(int argc, char ** argv) {
 
                 if (cmd.find("BTN_ON") != std::string::npos) {
                     if (!audio_enabled) {
-                        fprintf(stderr, "[Control] Audio capture ENABLED\n");
-                        audio_enabled = true;
-                        audio.resume();
+                        fprintf(stderr, "[Control] Audio capture ENABLED - Opening audio device\n");
+                        if (init_audio_device(audio, params.length_ms, params.capture_id)) {
+                            audio_enabled = true;
+                        } else {
+                            fprintf(stderr, "[Control] Failed to open audio device\n");
+                        }
                     }
                 } else if (cmd.find("BTN_OFF") != std::string::npos) {
                     if (audio_enabled) {
-                        fprintf(stderr, "[Control] Audio capture DISABLED\n");
+                        fprintf(stderr, "[Control] Audio capture DISABLED - Closing audio device\n");
                         audio_enabled = false;
-                        audio.pause();
-                        audio.clear();  // Clear buffered audio
+                        audio.reset();  // Destroy audio object, closing the device
                     }
                 }
             }
@@ -461,16 +479,16 @@ int main(int argc, char ** argv) {
                 if (!is_running) {
                     break;
                 }
-                audio.get(params.step_ms, pcmf32_new);
+                audio->get(params.step_ms, pcmf32_new);
 
                 if ((int) pcmf32_new.size() > 2*n_samples_step) {
                     fprintf(stderr, "\n\n%s: WARNING: cannot process audio fast enough, dropping audio ...\n\n", __func__);
-                    audio.clear();
+                    audio->clear();
                     continue;
                 }
 
                 if ((int) pcmf32_new.size() >= n_samples_step) {
-                    audio.clear();
+                    audio->clear();
                     break;
                 }
 
@@ -503,10 +521,10 @@ int main(int argc, char ** argv) {
                 continue;
             }
 
-            audio.get(2000, pcmf32_new);
+            audio->get(2000, pcmf32_new);
 
             if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
-                audio.get(params.length_ms, pcmf32);
+                audio->get(params.length_ms, pcmf32);
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -654,7 +672,9 @@ int main(int argc, char ** argv) {
         }
     }
 
-    audio.pause();
+    if (audio) {
+        audio->pause();
+    }
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
