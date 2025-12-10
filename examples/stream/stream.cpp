@@ -274,6 +274,7 @@ int main(int argc, char ** argv) {
     }
 
     int n_iter = 0;
+    int prev_text_len = 0;  // Track length of previously printed text for backspace clearing
 
     bool is_running = true;
 
@@ -425,12 +426,10 @@ int main(int argc, char ** argv) {
             // print result;
             {
                 if (!use_vad) {
-                    printf("\33[2K\r");
-
-                    // print long empty line to clear the previous line
-                    printf("%s", std::string(100, ' ').c_str());
-
-                    printf("\33[2K\r");
+                    // Use backspace characters to erase previous text
+                    printf("%s", std::string(prev_text_len, '\b').c_str());
+                    printf("%s", std::string(prev_text_len, ' ').c_str());
+                    printf("%s", std::string(prev_text_len, '\b').c_str());
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
                     const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
@@ -440,6 +439,7 @@ int main(int argc, char ** argv) {
                     printf("\n");
                 }
 
+                int current_text_len = 0;  // Track length of text in this iteration
                 const int n_segments = whisper_full_n_segments(ctx);
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
@@ -447,6 +447,7 @@ int main(int argc, char ** argv) {
                     if (params.no_timestamps) {
                         printf("%s", text);
                         fflush(stdout);
+                        current_text_len += strlen(text);
 
                         if (params.fname_out.length() > 0) {
                             fout << text;
@@ -467,6 +468,7 @@ int main(int argc, char ** argv) {
 
                         printf("%s", output.c_str());
                         fflush(stdout);
+                        current_text_len += output.length();
 
                         if (params.fname_out.length() > 0) {
                             fout << output;
@@ -474,6 +476,11 @@ int main(int argc, char ** argv) {
 
 			hid_echo(serial_fd, text);
                     }
+                }
+
+                // Update previous text length for next iteration (only in non-VAD mode)
+                if (!use_vad) {
+                    prev_text_len = current_text_len;
                 }
 
                 if (params.fname_out.length() > 0) {
@@ -490,6 +497,7 @@ int main(int argc, char ** argv) {
 
             if (!use_vad && (n_iter % n_new_line) == 0) {
                 printf("\n");
+                prev_text_len = 0;  // Reset after newline since we're starting a fresh line
 
                 // keep part of the audio for next iteration to try to mitigate word boundary issues
                 pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
