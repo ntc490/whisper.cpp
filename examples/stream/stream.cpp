@@ -140,15 +140,39 @@ int init_serial_port(const std::string& device, int baud_rate = B115200) {
 }
 
 void hid_echo(int serial_fd, const std::string &text) {
-    // Filter out the [BLANK AUDIO] message and maybe others
-    if (text.find("[BLANK_AUDIO]") != std::string::npos) {
-	return;
-    }
-
     // Write to serial port if configured
     if (serial_fd < 0) {
 	return;
     }
+
+    // Filter out any text that contains square brackets (non-speech annotations)
+    // Examples: [BLANK_AUDIO], [Silence], [Clock ticking], [Music], [typing], etc.
+    if (text.find('[') != std::string::npos || text.find(']') != std::string::npos) {
+        fprintf(stderr, "[HID] Filtered out: \"%s\"\n", text.c_str());
+        return;
+    }
+
+    // Skip if text is empty or only whitespace
+    bool has_content = false;
+    for (char c : text) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            has_content = true;
+            break;
+        }
+    }
+    if (!has_content) {
+        return;
+    }
+
+    // Debug: show what's being sent to HID with escaped chars
+    fprintf(stderr, "[HID] Sending: \"");
+    for (char c : text) {
+        if (c == '\n') fprintf(stderr, "\\n");
+        else if (c == '\r') fprintf(stderr, "\\r");
+        else if (c == '\t') fprintf(stderr, "\\t");
+        else fprintf(stderr, "%c", c);
+    }
+    fprintf(stderr, "\"\n");
 
     // write data to serial port
     write(serial_fd, text.c_str(), text.size());
