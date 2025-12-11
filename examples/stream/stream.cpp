@@ -409,6 +409,7 @@ int main(int argc, char ** argv) {
     int n_iter = 0;
     int prev_text_len = 0;  // Track length of previously printed text for backspace clearing
     int prev_hid_len = 0;   // Track length of text actually sent to HID device
+    std::string prev_hid_text;  // Track actual text sent to HID device
 
     bool is_running = true;
     bool audio_enabled = true;  // Audio capture enabled/disabled by control port
@@ -604,17 +605,51 @@ int main(int argc, char ** argv) {
 
             // print result;
             {
+                // First, check if HID text will be the same (do this before any printing)
+                int current_hid_len_temp = 0;
+                std::string current_hid_text_temp;
+                const int n_segments_temp = whisper_full_n_segments(ctx);
+                for (int i = 0; i < n_segments_temp; ++i) {
+                    const char * text = whisper_full_get_segment_text(ctx, i);
+                    std::string text_str(text);
+                    bool would_filter = false;
+
+                    if (text_str.find('[') != std::string::npos || text_str.find(']') != std::string::npos ||
+                        text_str.find('(') != std::string::npos || text_str.find(')') != std::string::npos) {
+                        would_filter = true;
+                    }
+
+                    bool has_content = false;
+                    for (char c : text_str) {
+                        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                            has_content = true;
+                            break;
+                        }
+                    }
+                    if (!has_content) {
+                        would_filter = true;
+                    }
+
+                    if (!would_filter) {
+                        current_hid_text_temp += text_str;
+                    }
+                }
+
+                bool hid_text_changed = (current_hid_text_temp != prev_hid_text);
+
                 if (!use_vad) {
                     // Use backspace characters to erase previous text on console
                     printf("%s", std::string(prev_text_len, '\b').c_str());
                     printf("%s", std::string(prev_text_len, ' ').c_str());
                     printf("%s", std::string(prev_text_len, '\b').c_str());
 
-                    // Send backspaces to serial port for text that was actually sent
-                    if (serial_fd >= 0 && prev_hid_len > 0) {
+                    // Send backspaces to serial port ONLY if text actually changed
+                    if (hid_text_changed && serial_fd >= 0 && prev_hid_len > 0) {
                         std::string backspaces(prev_hid_len, '\b');
                         write(serial_fd, backspaces.c_str(), backspaces.size());
                         fprintf(stderr, "[HID] Sent %d backspaces\n", prev_hid_len);
+                    } else if (!hid_text_changed && prev_hid_len > 0) {
+                        fprintf(stderr, "[HID] Text unchanged, skipping backspaces\n");
                     }
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
@@ -627,7 +662,10 @@ int main(int argc, char ** argv) {
 
                 int current_text_len = 0;  // Track length of text in this iteration
                 int current_hid_len = 0;   // Track length of text sent to HID in this iteration
+
                 const int n_segments = whisper_full_n_segments(ctx);
+
+                // Print and send (hid_text_changed already calculated above)
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
@@ -640,7 +678,26 @@ int main(int argc, char ** argv) {
                             fout << text;
                         }
 
-			current_hid_len += hid_echo(serial_fd, text);
+                        // Only send to HID if text changed
+                        if (hid_text_changed) {
+                            current_hid_len += hid_echo(serial_fd, text);
+                        } else {
+                            // Still count the length even if we didn't send
+                            std::string text_str(text);
+                            if (text_str.find('[') == std::string::npos && text_str.find(']') == std::string::npos &&
+                                text_str.find('(') == std::string::npos && text_str.find(')') == std::string::npos) {
+                                bool has_content = false;
+                                for (char c : text_str) {
+                                    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                                        has_content = true;
+                                        break;
+                                    }
+                                }
+                                if (has_content) {
+                                    current_hid_len += text_str.size();
+                                }
+                            }
+                        }
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
@@ -661,7 +718,26 @@ int main(int argc, char ** argv) {
                             fout << output;
                         }
 
-			current_hid_len += hid_echo(serial_fd, text);
+                        // Only send to HID if text changed
+                        if (hid_text_changed) {
+                            current_hid_len += hid_echo(serial_fd, text);
+                        } else {
+                            // Still count the length even if we didn't send
+                            std::string text_str(text);
+                            if (text_str.find('[') == std::string::npos && text_str.find(']') == std::string::npos &&
+                                text_str.find('(') == std::string::npos && text_str.find(')') == std::string::npos) {
+                                bool has_content = false;
+                                for (char c : text_str) {
+                                    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                                        has_content = true;
+                                        break;
+                                    }
+                                }
+                                if (has_content) {
+                                    current_hid_len += text_str.size();
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -669,6 +745,7 @@ int main(int argc, char ** argv) {
                 if (!use_vad) {
                     prev_text_len = current_text_len;
                     prev_hid_len = current_hid_len;
+                    prev_hid_text = current_hid_text_temp;  // Save the actual text sent
                 }
 
                 if (params.fname_out.length() > 0) {
@@ -687,6 +764,7 @@ int main(int argc, char ** argv) {
                 printf("\n");
                 prev_text_len = 0;  // Reset after newline since we're starting a fresh line
                 prev_hid_len = 0;   // Reset HID tracking too
+                prev_hid_text.clear();  // Clear HID text tracking too
 
                 // keep part of the audio for next iteration to try to mitigate word boundary issues
                 pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
